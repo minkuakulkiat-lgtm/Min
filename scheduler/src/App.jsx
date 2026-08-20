@@ -4,7 +4,7 @@ import {
   Users, LayoutDashboard, Plus, Trash2, X, Copy,
   Download, Upload, Settings, Edit, MapPin
 } from 'lucide-react';
-import { supabase } from './supabaseClient';
+import { supabase, configError } from './supabaseClient';
 
 // ===== แปลงข้อมูลระหว่างรูปแบบในฐานข้อมูล (snake_case) กับในแอป (camelCase) =====
 const rowToJob = (r) => ({
@@ -49,7 +49,16 @@ const staffToRow = (s) => ({
   headcount: s.headcount || 1,
 });
 
-const ROLES = ['Setup', 'Lighting Operator', 'LED', 'Sale & Marketing', 'Outsource Team'];
+const ROLES = ['Setup', 'Lighting Designer', 'Lighting Operator', 'LED', 'Sale & Marketing', 'Outsource Team'];
+const CUSTOM_ROLE = '__custom__';   // ค่าพิเศษ: ผู้ใช้เลือก "อื่นๆ" แล้วพิมพ์ตำแหน่งเอง
+
+// ตัวเลือกการจัดเรียงในหน้าตารางคิว
+const SORT_OPTIONS = [
+  { value: 'role',  label: 'ตามตำแหน่ง (จัดกลุ่ม)' },
+  { value: 'name',  label: 'ตามตัวอักษรชื่อ ก-ฮ' },
+  { value: 'busy',  label: 'คนงานเยอะอยู่บน' },
+  { value: 'free',  label: 'คนว่างอยู่บน' },
+];
 
 const JOB_STATUSES = {
   PENDING: 'รอยืนยัน',
@@ -68,10 +77,10 @@ const PHASE_TYPES = ['Load in', 'Setup', 'Rehearsal', 'Runthrough', 'Show Day', 
 const PHASE_COLORS = {
   'Load in': 'bg-orange-500',
   'Setup': 'bg-blue-500',
-  'Rehearsal': 'bg-amber-500',
+  'Rehearsal': 'bg-yellow-600',
   'Runthrough': 'bg-purple-500',
   'Show Day': 'bg-green-600',
-  'Dismantle': 'bg-red-500'
+  'Dismantle': 'bg-rose-700'
 };
 
 const getPhaseColor = (type) => PHASE_COLORS[type] || 'bg-teal-600';
@@ -87,6 +96,38 @@ const JOB_COLORS = [
   { name: 'ส้ม', value: 'bg-orange-100 text-orange-800 border-orange-400' },
   { name: 'เทา', value: 'bg-gray-100 text-gray-800 border-gray-400' }
 ];
+
+// คืนลิงก์แผนที่ของงาน: ใช้ลิงก์ที่ผู้ใช้ฝังไว้ก่อน ถ้าไม่มีให้ค้นจากชื่อสถานที่
+const getMapUrl = (job) => {
+  if (!job) return null;
+  if (job.mapUrl && job.mapUrl.trim()) return job.mapUrl.trim();
+  if (job.location && job.location.trim()) {
+    return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(job.location.trim());
+  }
+  return null;
+};
+
+// แสดงชื่อสถานที่แบบกดแล้วเปิดแผนที่ได้ (ใช้ร่วมกันทุกหน้า)
+function LocationLink({ job, size = 11, className = '' }) {
+  if (!job || !job.location) return null;
+  const url = getMapUrl(job);
+  const content = (<><MapPin size={size} className="flex-shrink-0" /> <span className="truncate">{job.location}</span></>);
+  if (!url) {
+    return <span className={`inline-flex items-center gap-1 ${className}`}>{content}</span>;
+  }
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={e => e.stopPropagation()}
+      title={'เปิดแผนที่: ' + job.location}
+      className={`inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 hover:underline ${className}`}
+    >
+      {content}
+    </a>
+  );
+}
 
 const formatThaiDate = (dateStr) => {
   if (!dateStr) return '';
@@ -133,14 +174,35 @@ function CustomDialog({ dialog, setDialog }) {
     <div className="fixed inset-0 bg-black/60 flex items-start justify-center overflow-y-auto z-50 p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6 text-center">
          <div className={`mx-auto flex items-center justify-center h-12 w-12 rounded-full mb-4 ${dialog.type === 'confirm' ? 'bg-yellow-100 text-yellow-600' : dialog.type === 'import' ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'}`}>
-            {dialog.type === 'confirm' ? <CalendarIcon size={24} /> : dialog.type === 'import' ? <Upload size={24} /> : <Users size={24} />}
+            {dialog.type === 'confirm' ? <CalendarIcon size={24} /> : dialog.type === 'import' ? <Upload size={24} /> : dialog.type === 'choice' ? <Users size={24} /> : <Users size={24} />}
          </div>
          <h3 className="text-lg font-bold text-gray-900 mb-2">
-            {dialog.type === 'confirm' ? 'ยืนยันการทำรายการ' : dialog.type === 'import' ? 'นำเข้าข้อมูลไฟล์ Backup' : 'แจ้งเตือน'}
+            {dialog.type === 'confirm' ? 'ยืนยันการทำรายการ'
+              : dialog.type === 'import' ? 'นำเข้าข้อมูลไฟล์ Backup'
+              : dialog.type === 'choice' ? (dialog.title || 'เลือกวิธีดำเนินการ')
+              : 'แจ้งเตือน'}
          </h3>
          <p className="text-gray-600 text-sm mb-6 whitespace-pre-line text-left bg-gray-50 p-3 rounded-lg border">{dialog.message}</p>
 
-         {dialog.type === 'import' ? (
+         {dialog.type === 'choice' ? (
+            <div className="flex flex-col gap-2">
+               <button
+                  onClick={() => { const a = dialog.onOptionA; setDialog({ isOpen: false, type: 'info', message: '', onConfirm: null }); if(a) setTimeout(a, 150); }}
+                  className="px-5 py-2.5 bg-blue-600 text-white hover:bg-blue-700 rounded-lg text-sm font-bold transition-colors w-full shadow-sm"
+               >
+                  {dialog.labelA || 'ตัวเลือก A'}
+               </button>
+               <button
+                  onClick={() => { const a = dialog.onOptionB; setDialog({ isOpen: false, type: 'info', message: '', onConfirm: null }); if(a) setTimeout(a, 150); }}
+                  className="px-5 py-2.5 bg-gray-700 text-white hover:bg-gray-800 rounded-lg text-sm font-bold transition-colors w-full shadow-sm"
+               >
+                  {dialog.labelB || 'ตัวเลือก B'}
+               </button>
+               <button onClick={() => setDialog({ isOpen: false, type: 'info', message: '', onConfirm: null })} className="px-5 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 rounded-lg text-sm font-bold transition-colors w-full">
+                  ยกเลิก
+               </button>
+            </div>
+         ) : dialog.type === 'import' ? (
             <div className="flex flex-col gap-2">
                <button
                   onClick={() => { const action = dialog.onMerge; setDialog({ isOpen: false, type: 'info', message: '', onConfirm: null }); if(action) setTimeout(action, 150); }}
@@ -300,7 +362,7 @@ function DailyEditModal({ dailyEditContext, setDailyEditContext, staffList, hand
   );
 }
 
-function JobFormModal({ isJobModalOpen, setIsJobModalOpen, editingJob, setEditingJob, handleSaveJob, handleDeleteJob, staffList, setDialog }) {
+function JobFormModal({ isJobModalOpen, setIsJobModalOpen, editingJob, setEditingJob, handleSaveJob, handleDeleteJob, staffList, setDialog, savedLocations = [] }) {
   if (!isJobModalOpen) return null;
 
   const [jobData, setJobData] = useState({
@@ -527,8 +589,32 @@ function JobFormModal({ isJobModalOpen, setIsJobModalOpen, editingJob, setEditin
               </div>
             </div>
             <div className="md:col-span-2">
-              <label className="block text-[11px] font-bold text-gray-500 mb-1">สถานที่ (ชื่อ)</label>
-              <input type="text" value={jobData.location} onChange={e => setJobData({...jobData, location: e.target.value})} placeholder="ระบุชื่อสถานที่จัดงาน" className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-blue-500 outline-none text-sm" />
+              <label className="flex justify-between block text-[11px] font-bold text-gray-500 mb-1">
+                <span>สถานที่ (ชื่อ)</span>
+                {savedLocations.length > 0 && (
+                  <span className="text-gray-400 font-normal">พิมพ์เพื่อค้นหา หรือกดเลือกจาก {savedLocations.length} ที่ที่เคยใช้</span>
+                )}
+              </label>
+              <input
+                type="text"
+                list="savedLocationList"
+                value={jobData.location}
+                onChange={e => {
+                  const val = e.target.value;
+                  // ถ้าเลือกสถานที่ที่เคยบันทึกไว้ ให้เติมลิงก์แผนที่ให้อัตโนมัติ
+                  const hit = savedLocations.find(l => l.location === val);
+                  setJobData(prev => ({
+                    ...prev,
+                    location: val,
+                    mapUrl: (hit && hit.mapUrl) ? hit.mapUrl : prev.mapUrl
+                  }));
+                }}
+                placeholder="ระบุชื่อสถานที่จัดงาน"
+                className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+              />
+              <datalist id="savedLocationList">
+                {savedLocations.map(l => <option key={l.location} value={l.location} />)}
+              </datalist>
             </div>
             <div className="md:col-span-2">
               <label className="flex justify-between block text-[11px] font-bold text-gray-500 mb-1">
@@ -752,6 +838,7 @@ export default function App() {
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
   const [isMobile, setIsMobile] = useState(false);
   const [connError, setConnError] = useState('');
+  const [ganttSort, setGanttSort] = useState('role');
   const [isSaving, setIsSaving] = useState(false);
 
   const [activeTab, setActiveTab] = useState('calendar');
@@ -763,7 +850,7 @@ export default function App() {
   const [dailyEditContext, setDailyEditContext] = useState(null);
 
   const [isStaffManagementModalOpen, setIsStaffManagementModalOpen] = useState(false);
-  const [staffForm, setStaffForm] = useState({ name: '', role: ROLES[0], phone: '', headcount: 1 });
+  const [staffForm, setStaffForm] = useState({ name: '', role: ROLES[0], customRole: '', phone: '', headcount: 1 });
   const [editingStaffId, setEditingStaffId] = useState(null);
 
   const [isLineSummaryOpen, setIsLineSummaryOpen] = useState(false);
@@ -789,6 +876,7 @@ export default function App() {
 
   // ===== โหลดข้อมูลจาก Supabase + รับการเปลี่ยนแปลงแบบ realtime =====
   const loadAll = async () => {
+    if (!supabase) { setIsDataLoaded(true); return; }
     try {
       const [jobsRes, staffRes] = await Promise.all([
         supabase.from('jobs').select('*'),
@@ -809,6 +897,7 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!supabase) { setIsDataLoaded(true); return; }
     loadAll();
 
     // ฟังการเปลี่ยนแปลงจากคนอื่นแบบทันที (realtime)
@@ -827,6 +916,56 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);
+
+  // ยังตั้งค่ากุญแจเชื่อมต่อไม่ครบ — แสดงวิธีแก้แทนหน้าขาว
+  if (configError) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-start justify-center p-4 overflow-y-auto">
+        <div className="bg-white border border-amber-300 rounded-xl p-6 max-w-2xl w-full my-8 shadow-sm">
+          <div className="text-4xl mb-3 text-center">🔧</div>
+          <h2 className="font-bold text-xl text-gray-900 mb-2 text-center">ยังตั้งค่าไม่เสร็จ</h2>
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-900 mb-5 text-center font-bold">
+            {configError}
+          </div>
+
+          <p className="text-sm text-gray-700 mb-3 font-bold">วิธีแก้ (เลือกตามวิธีที่ใช้ deploy):</p>
+
+          <div className="mb-5">
+            <div className="font-bold text-sm text-gray-800 mb-2">📦 ถ้าลากโฟลเดอร์ dist ขึ้น Netlify เอง</div>
+            <ol className="text-sm text-gray-700 space-y-1.5 list-decimal list-inside pl-1">
+              <li>กลับไปที่โฟลเดอร์ <code className="bg-gray-100 px-1 rounded">scheduler</code> ในเครื่อง</li>
+              <li>ตรวจว่ามีไฟล์ชื่อ <code className="bg-gray-100 px-1 rounded">.env</code> (ไม่ใช่ <code className="bg-gray-100 px-1 rounded">.env.txt</code>)</li>
+              <li>ข้างในต้องมี 2 บรรทัดนี้ ไม่มีเว้นวรรครอบเครื่องหมาย =</li>
+            </ol>
+            <pre className="bg-gray-900 text-gray-100 text-xs p-3 rounded-lg mt-2 overflow-x-auto">VITE_SUPABASE_URL=https://xxxxx.supabase.co
+VITE_SUPABASE_ANON_KEY=sb_publishable_xxxxx...</pre>
+            <ol className="text-sm text-gray-700 space-y-1.5 list-decimal list-inside pl-1 mt-2" start={4}>
+              <li>พิมพ์ <code className="bg-gray-100 px-1 rounded">npm run build</code> ใหม่อีกครั้ง</li>
+              <li>ลากโฟลเดอร์ <code className="bg-gray-100 px-1 rounded">dist</code> ขึ้น Netlify ใหม่</li>
+            </ol>
+          </div>
+
+          <div className="mb-5">
+            <div className="font-bold text-sm text-gray-800 mb-2">🔗 ถ้าเชื่อมผ่าน GitHub</div>
+            <ol className="text-sm text-gray-700 space-y-1.5 list-decimal list-inside pl-1">
+              <li>เข้า Netlify → <b>Site configuration</b> → <b>Environment variables</b></li>
+              <li>กด <b>Add a variable</b> ใส่ทั้ง 2 ค่าข้างบน</li>
+              <li>ไปที่แท็บ <b>Deploys</b> → <b>Trigger deploy</b> → <b>Clear cache and deploy site</b></li>
+            </ol>
+            <p className="text-xs text-gray-500 mt-2">
+              ⚠️ ใส่ค่าแล้วต้อง deploy ใหม่เสมอ ค่าจะไม่มีผลกับเว็บที่ build ไปแล้ว
+            </p>
+          </div>
+
+          <p className="text-xs text-gray-500 border-t pt-3">
+            <b>Project URL</b> อยู่ที่ Supabase → Project Settings → <b>Data API</b><br/>
+            <b>Publishable key</b> (ขึ้นต้นด้วย sb_publishable_) อยู่ที่ Project Settings → <b>API Keys</b><br/>
+            ⛔ ห้ามใช้ Secret key (sb_secret_) หรือ service_role เด็ดขาด
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   if (!isDataLoaded) {
     return (
@@ -863,7 +1002,10 @@ export default function App() {
   const handleExportData = () => {
     const dataToSave = { jobList, staffList, exportDate: new Date().toISOString() };
     const json = JSON.stringify(dataToSave, null, 2);
-    const filename = `prod_backup_${new Date().getTime()}.json`;
+    // ชื่อไฟล์: schedule backup YYYY-MM-DD (ชื่อไฟล์ใช้ / ไม่ได้ จึงใช้ - แทน เรียงตามวันที่ได้เหมือนกัน)
+    const n = new Date();
+    const stamp = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
+    const filename = `schedule backup ${stamp}.json`;
 
     // วิธีที่ 1: ดาวน์โหลดเป็นไฟล์ผ่าน Blob (เสถียรกว่า data: URL)
     try {
@@ -1021,9 +1163,12 @@ export default function App() {
   };
 
   const handleEditStaffClick = (staff) => {
+    // ถ้าตำแหน่งที่บันทึกไว้ไม่อยู่ในรายการมาตรฐาน แปลว่าเป็นตำแหน่งที่พิมพ์เอง
+    const isCustom = !ROLES.includes(staff.role);
     setStaffForm({
       name: staff.name,
-      role: staff.role,
+      role: isCustom ? CUSTOM_ROLE : staff.role,
+      customRole: isCustom ? staff.role : '',
       phone: staff.phone || '',
       headcount: staff.headcount || 1
     });
@@ -1036,10 +1181,21 @@ export default function App() {
       setDialog({ isOpen: true, type: 'info', message: 'กรุณากรอกชื่อ/บริษัท ก่อนบันทึก' });
       return;
     }
-    const finalHeadcount = staffForm.role === 'Outsource Team' ? parseInt(staffForm.headcount || '1', 10) : 1;
+    // ถ้าเลือก "อื่นๆ" ต้องพิมพ์ชื่อตำแหน่งด้วย
+    let finalRole = staffForm.role;
+    if (finalRole === CUSTOM_ROLE) {
+      if (!(staffForm.customRole || '').trim()) {
+        setDialog({ isOpen: true, type: 'info', message: 'กรุณาพิมพ์ชื่อตำแหน่ง ในช่องใต้ตัวเลือก "อื่นๆ (ระบุเอง)"' });
+        return;
+      }
+      finalRole = staffForm.customRole.trim();
+    }
+    const finalHeadcount = finalRole === 'Outsource Team' ? parseInt(staffForm.headcount || '1', 10) : 1;
     const record = {
       id: editingStaffId || `s${Date.now()}`,
-      ...staffForm,
+      name: staffForm.name,
+      role: finalRole,
+      phone: staffForm.phone || '',
       headcount: finalHeadcount
     };
     try {
@@ -1048,7 +1204,7 @@ export default function App() {
       if (error) throw error;
       await loadAll();
       setEditingStaffId(null);
-      setStaffForm({ name: '', role: ROLES[0], phone: '', headcount: 1 });
+      setStaffForm({ name: '', role: ROLES[0], customRole: '', phone: '', headcount: 1 });
     } catch (err) {
       setDialog({ isOpen: true, type: 'info', message: 'บันทึกไม่สำเร็จ: ' + err.message });
     } finally {
@@ -1056,7 +1212,61 @@ export default function App() {
     }
   };
 
+  // เขียนงานลงฐานข้อมูลจริง (แยกออกมาเพื่อให้เรียกซ้ำได้หลังผู้ใช้เลือกวิธี)
+  const writeJob = async (jobData) => {
+    try {
+      setIsSaving(true);
+      const { error } = await supabase.from('jobs').upsert(jobToRow(jobData));
+      if (error) throw error;
+      await loadAll();
+      setIsJobModalOpen(false);
+      setEditingJob(null);
+    } catch (e) {
+      setDialog({ isOpen: true, type: 'info', message: 'บันทึกไม่สำเร็จ: ' + e.message });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const handleSaveJob = async (jobData) => {
+    // ---- ตรวจว่ามีคนถูกเพิ่มเข้าทีมงานของโปรเจกต์ใหม่หรือไม่ ----
+    // ถ้ามี และงานนี้เคยถูกปรับแต่งรายวันไว้ ต้องถามก่อนว่าจะให้คนใหม่เข้าวันไหนบ้าง
+    // (ไม่งั้นวันที่เคยแก้ไว้จะไม่มีคนใหม่ ทำให้ปฏิทินดูเหมือนไม่อัปเดต)
+    const oldIds = (editingJob && editingJob.assignedStaffIds) || [];
+    const newIds = jobData.assignedStaffIds || [];
+    const addedIds = newIds.filter(id => !oldIds.includes(id));
+    const overrideDates = Object.keys(jobData.dailyOverrides || {});
+
+    if (addedIds.length > 0 && overrideDates.length > 0) {
+      const names = addedIds.map(id => {
+        const s = staffList.find(x => x.id === id);
+        return s ? s.name : 'ไม่ทราบชื่อ';
+      }).join(', ');
+
+      setDialog({
+        isOpen: true,
+        type: 'choice',
+        title: 'เพิ่มคนใหม่เข้าวันไหนบ้าง?',
+        message:
+          'คุณเพิ่ม ' + names + ' เข้าทีมงานของงานนี้\n\n' +
+          'งานนี้มี ' + overrideDates.length + ' วันที่เคยปรับแต่งรายชื่อคนแยกไว้แล้ว\n' +
+          'ต้องการให้คนที่เพิ่มใหม่เข้าวันไหนบ้าง?',
+        labelA: 'เพิ่มให้ทุกวัน (รวมวันที่เคยแก้ไว้)',
+        labelB: 'เฉพาะวันที่ยังไม่เคยแก้',
+        onOptionA: () => {
+          // เติมคนใหม่เข้าไปในทุกวันที่เคยปรับแต่งไว้ด้วย
+          const merged = { ...(jobData.dailyOverrides || {}) };
+          overrideDates.forEach(d => {
+            const cur = merged[d].staffIds || [];
+            merged[d] = { ...merged[d], staffIds: Array.from(new Set([...cur, ...addedIds])) };
+          });
+          writeJob({ ...jobData, dailyOverrides: merged });
+        },
+        onOptionB: () => writeJob(jobData),
+      });
+      return;
+    }
+
     try {
       setIsSaving(true);
       const { error } = await supabase.from('jobs').upsert(jobToRow(jobData));
@@ -1105,14 +1315,14 @@ export default function App() {
     }
 
     todayJobs.forEach(job => {
-      summary += `📌 งาน: ${job.name}\n`;
-      summary += `📍 สถานที่: ${job.location || 'ไม่ระบุ'}\n`;
+      summary += `📌 Job: ${job.name}\n`;
+      summary += `📍 Location: ${job.location || 'ไม่ระบุ'}\n`;
       if (job.mapUrl) {
-          summary += `🗺️ แผนที่: ${job.mapUrl}\n`;
+          summary += `🗺️ Map: ${job.mapUrl}\n`;
       } else if (job.location) {
-          summary += `🗺️ แผนที่: https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.location)}\n`;
+          summary += `🗺️ Map: https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.location)}\n`;
       }
-      summary += `⏰ กิจกรรมวันนี้:\n`;
+      summary += `⏰ Plan:\n`;
 
       const phasesToday = getPhasesOnDate(job, todayStr);
       phasesToday.sort((a, b) => a.startTime.localeCompare(b.startTime));
@@ -1127,12 +1337,25 @@ export default function App() {
         return staff ? (staff.role === 'Outsource Team' && staff.headcount > 1 ? `${staff.name} (${staff.headcount} คน)` : `${staff.name}`) : 'ไม่ทราบชื่อ';
       });
 
-      summary += `👥 ทีมงาน: ${assigned.length > 0 ? assigned.join(', ') : 'ยังไม่จัดคน'}\n`;
+      summary += `👥 Team: ${assigned.length > 0 ? assigned.join(', ') : 'ยังไม่จัดคน'}\n`;
       summary += `----------------------\n`;
     });
 
     return summary;
   };
+
+  // รวบรวมสถานที่ที่เคยกรอกไว้ เพื่อให้เลือกซ้ำได้ไม่ต้องพิมพ์ใหม่
+  // ถ้าสถานที่เดียวกันเคยใส่ลิงก์แผนที่ไว้ จะจำลิงก์ล่าสุดที่ไม่ว่างไว้ให้ด้วย
+  const savedLocations = (() => {
+    const map = new Map();
+    jobList.forEach(job => {
+      const loc = (job.location || '').trim();
+      if (!loc) return;
+      const prev = map.get(loc);
+      map.set(loc, { location: loc, mapUrl: (job.mapUrl || '').trim() || (prev ? prev.mapUrl : '') });
+    });
+    return Array.from(map.values()).sort((a, b) => a.location.localeCompare(b.location, 'th'));
+  })();
 
   const renderDashboard = () => {
     const allJobsSorted = [...jobList].sort((a, b) => {
@@ -1217,7 +1440,7 @@ export default function App() {
                   monthlyJobs.map((job) => {
                     const sortedPhases = [...(job.phases || [])].sort((a, b) => new Date(a.startDate || a.date) - new Date(b.startDate || b.date));
                     const firstDate = sortedPhases.length > 0 ? formatThaiDate(sortedPhases[0].startDate || sortedPhases[0].date) : '-';
-                    const mapUrl = job.mapUrl || (job.location ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.location)}` : null);
+                    const mapUrl = getMapUrl(job);
 
                     return (
                       <tr key={job.id} className="bg-white border-b hover:bg-gray-50 cursor-pointer transition-colors" onClick={() => { if(currentUserRole==='admin') { setEditingJob(job); setIsJobModalOpen(true); } }}>
@@ -1225,7 +1448,7 @@ export default function App() {
                         <td className="px-4 py-3 font-bold text-gray-900">{job.name}</td>
                         <td className="px-4 py-3 text-gray-600">
                           {mapUrl ? (
-                              <a href={mapUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-blue-600 hover:underline" onClick={e => e.stopPropagation()}>
+                              <a href={mapUrl} target="_blank" rel="noopener noreferrer" title={'เปิดแผนที่: ' + (job.location || '')} className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 hover:underline" onClick={e => e.stopPropagation()}>
                                   <MapPin size={14} /> {job.location || 'ดูแผนที่'}
                               </a>
                           ) : '-'}
@@ -1261,7 +1484,7 @@ export default function App() {
                   allJobsSorted.map((job) => {
                     const sortedPhases = [...(job.phases || [])].sort((a, b) => new Date(a.startDate || a.date) - new Date(b.startDate || b.date));
                     const firstDate = sortedPhases.length > 0 ? formatThaiDate(sortedPhases[0].startDate || sortedPhases[0].date) : '-';
-                    const mapUrl = job.mapUrl || (job.location ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.location)}` : null);
+                    const mapUrl = getMapUrl(job);
 
                     return (
                       <tr key={job.id} className="bg-white border-b hover:bg-gray-50 cursor-pointer transition-colors" onClick={() => { if(currentUserRole==='admin') { setEditingJob(job); setIsJobModalOpen(true); } }}>
@@ -1269,7 +1492,7 @@ export default function App() {
                         <td className="px-4 py-3 font-bold text-gray-900">{job.name}</td>
                         <td className="px-4 py-3 text-gray-600">
                           {mapUrl ? (
-                              <a href={mapUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-blue-600 hover:underline" onClick={e => e.stopPropagation()}>
+                              <a href={mapUrl} target="_blank" rel="noopener noreferrer" title={'เปิดแผนที่: ' + (job.location || '')} className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 hover:underline" onClick={e => e.stopPropagation()}>
                                   <MapPin size={14} /> {job.location || 'ดูแผนที่'}
                               </a>
                           ) : '-'}
@@ -1409,8 +1632,8 @@ export default function App() {
                               </div>
 
                               {job.location && (
-                                <div className="text-[11px] text-gray-600 mb-1.5 flex items-center gap-1">
-                                  <MapPin size={11} /> {job.location}
+                                <div className="text-[11px] mb-1.5">
+                                  <LocationLink job={job} size={11} />
                                 </div>
                               )}
 
@@ -1494,6 +1717,12 @@ export default function App() {
                             👥 {staffNames.length > 0 ? staffNames.join(', ') : 'ไม่ได้จัดคน'}
                           </div>
 
+                          {job.location && (
+                            <div className="text-[9px] mt-1 bg-white/40 p-0.5 rounded leading-tight overflow-hidden">
+                              <LocationLink job={job} size={9} />
+                            </div>
+                          )}
+
                           {job.dailyOverrides && job.dailyOverrides[dateStr] && (
                              <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-blue-500 rounded-full border border-white shadow-sm" title="มีการปรับเวลา/คน เฉพาะวันนี้"></div>
                           )}
@@ -1535,7 +1764,7 @@ export default function App() {
                   monthlyCalendarJobs.map((job) => {
                     const sortedPhases = [...(job.phases || [])].sort((a, b) => new Date(a.startDate || a.date) - new Date(b.startDate || b.date));
                     const firstDate = sortedPhases.length > 0 ? formatThaiDate(sortedPhases[0].startDate || sortedPhases[0].date) : '-';
-                    const mapUrl = job.mapUrl || (job.location ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.location)}` : null);
+                    const mapUrl = getMapUrl(job);
 
                     return (
                       <tr key={job.id} className="bg-white border-b hover:bg-gray-50 cursor-pointer transition-colors" onClick={() => { if(currentUserRole==='admin') { setEditingJob(job); setIsJobModalOpen(true); } }}>
@@ -1543,7 +1772,7 @@ export default function App() {
                         <td className="px-4 py-3 font-bold text-gray-900">{job.name}</td>
                         <td className="px-4 py-3 text-gray-600">
                           {mapUrl ? (
-                              <a href={mapUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-blue-600 hover:underline" onClick={e => e.stopPropagation()}>
+                              <a href={mapUrl} target="_blank" rel="noopener noreferrer" title={'เปิดแผนที่: ' + (job.location || '')} className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 hover:underline" onClick={e => e.stopPropagation()}>
                                   <MapPin size={14} /> {job.location || 'ดูแผนที่'}
                               </a>
                           ) : '-'}
@@ -1561,12 +1790,58 @@ export default function App() {
     );
   };
 
+  // นับจำนวนวันที่แต่ละคนมีงานในเดือนที่กำลังดู (ใช้เรียงตามความยุ่ง/ความว่าง)
+  const countBusyDays = (staffId, year, month) => {
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    let n = 0;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const has = jobList.some(job =>
+        job.status !== JOB_STATUSES.CANCELLED &&
+        getStaffOnDate(job, dateStr).includes(staffId) &&
+        getPhasesOnDate(job, dateStr).length > 0
+      );
+      if (has) n++;
+    }
+    return n;
+  };
+
+  const sortGanttStaff = (list, mode, year, month) => {
+    const arr = [...list];
+    if (mode === 'name') {
+      arr.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'th'));
+    } else if (mode === 'busy' || mode === 'free') {
+      const cache = new Map();
+      const busyOf = (s) => {
+        if (!cache.has(s.id)) cache.set(s.id, countBusyDays(s.id, year, month));
+        return cache.get(s.id);
+      };
+      arr.sort((a, b) => {
+        const diff = mode === 'busy' ? busyOf(b) - busyOf(a) : busyOf(a) - busyOf(b);
+        return diff !== 0 ? diff : (a.name || '').localeCompare(b.name || '', 'th');
+      });
+    } else {
+      // ตามตำแหน่ง: เรียงตามลำดับใน ROLES ก่อน แล้วตำแหน่งที่พิมพ์เองต่อท้าย
+      arr.sort((a, b) => {
+        const ia = ROLES.indexOf(a.role); const ib = ROLES.indexOf(b.role);
+        const ra = ia === -1 ? ROLES.length : ia;
+        const rb = ib === -1 ? ROLES.length : ib;
+        if (ra !== rb) return ra - rb;
+        const roleCmp = (a.role || '').localeCompare(b.role || '', 'th');
+        if (roleCmp !== 0) return roleCmp;
+        return (a.name || '').localeCompare(b.name || '', 'th');
+      });
+    }
+    return arr;
+  };
+
   const renderGanttChart = () => {
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth();
     const daysInMonth = new Date(year, month + 1, 0).getDate();
     const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
     const dayNamesShort = ['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.'];
+    const sortedGanttStaff = sortGanttStaff(staffList, ganttSort, year, month);
 
     // ===== มุมมองมือถือ: แสดงเป็นการ์ดรายคน อ่านง่ายกว่าตารางกว้าง 800px =====
     if (isMobile) {
@@ -1583,6 +1858,16 @@ export default function App() {
             <div className="text-sm font-bold text-blue-600 mt-2">
               {currentDate.toLocaleDateString('th-TH', { month: 'long', year: 'numeric' })}
             </div>
+            <div className="flex items-center gap-2 mt-3">
+              <label className="text-xs font-bold text-gray-500 flex-shrink-0">เรียงตาม:</label>
+              <select
+                value={ganttSort}
+                onChange={e => setGanttSort(e.target.value)}
+                className="flex-1 border border-gray-300 rounded-lg text-sm p-2 bg-white outline-none focus:border-blue-500 font-medium"
+              >
+                {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
           </div>
 
           {staffList.length === 0 ? (
@@ -1590,7 +1875,7 @@ export default function App() {
               ยังไม่มีรายชื่อทีมงานในระบบ
             </div>
           ) : (
-            staffList.map(staff => {
+            sortedGanttStaff.map(staff => {
               // รวบรวมวันทำงานของคนนี้ในเดือนที่เลือก
               const workDays = [];
               days.forEach(day => {
@@ -1644,8 +1929,8 @@ export default function App() {
                                 ))}
                               </div>
                               {w.job.location && (
-                                <div className="text-[10px] text-gray-500 mt-1 flex items-center gap-1">
-                                  <MapPin size={10} /> {w.job.location}
+                                <div className="text-[10px] mt-1">
+                                  <LocationLink job={w.job} size={10} />
                                 </div>
                               )}
                             </div>
@@ -1664,11 +1949,28 @@ export default function App() {
 
     return (
       <div className="bg-white rounded-xl shadow-sm border p-4 overflow-x-auto">
-        <div className="flex justify-between items-center mb-3 sticky left-0">
+        <div className="flex flex-wrap justify-between items-center gap-3 mb-3 sticky left-0">
           <h2 className="text-xl font-bold text-gray-800">ตารางคิวทีมงาน / Outsource</h2>
-          <div className="flex gap-2">
-            <button onClick={() => setCurrentDate(new Date(year, month - 1))} className="p-2 border rounded hover:bg-gray-50 transition-colors"><ChevronLeft size={20} /></button>
-            <button onClick={() => setCurrentDate(new Date(year, month + 1))} className="p-2 border rounded hover:bg-gray-50 transition-colors"><ChevronRight size={20} /></button>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-bold text-gray-500">เรียงตาม:</label>
+              <select
+                value={ganttSort}
+                onChange={e => setGanttSort(e.target.value)}
+                className="border border-gray-300 rounded-lg text-sm p-1.5 bg-white outline-none focus:border-blue-500 font-medium"
+              >
+                {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2 bg-gray-50 p-1 rounded-lg border shadow-sm">
+              <button onClick={() => setCurrentDate(new Date(year, month - 1))} className="p-1.5 hover:bg-white rounded transition-colors text-gray-600"><ChevronLeft size={20} /></button>
+              <span className="font-bold text-gray-800 text-center select-none" style={{minWidth: 130}}>
+                {currentDate.toLocaleDateString('th-TH', { month: 'long', year: 'numeric' })}
+              </span>
+              <button onClick={() => setCurrentDate(new Date(year, month + 1))} className="p-1.5 hover:bg-white rounded transition-colors text-gray-600"><ChevronRight size={20} /></button>
+            </div>
           </div>
         </div>
 
@@ -1682,7 +1984,7 @@ export default function App() {
           ))}
         </div>
 
-        <div style={{minWidth: 800}}>
+        <div style={{minWidth: 1200}}>
           <table className="w-full border-collapse text-sm">
             <thead>
               <tr>
@@ -1694,7 +1996,7 @@ export default function App() {
                   const isToday = new Date().toDateString() === dateObj.toDateString();
 
                   return (
-                    <th key={day} className={`border border-gray-200 p-1 text-xs text-center ${isToday ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-600'} ${isSunday ? 'border-r-2 border-r-gray-400' : ''}`} style={{minWidth: 40}}>
+                    <th key={day} className={`border border-gray-200 p-1 text-xs text-center ${isToday ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-600'} ${isSunday ? 'border-r-2 border-r-gray-400' : ''}`} style={{minWidth: 104}}>
                       <div className="font-bold">{dayNamesShort[dayOfWeek]}</div>
                       <div className={isToday ? 'font-black' : 'font-medium'}>{day}</div>
                     </th>
@@ -1703,7 +2005,7 @@ export default function App() {
               </tr>
             </thead>
             <tbody>
-              {staffList.map((staff, index) => {
+              {sortedGanttStaff.map((staff, index) => {
                 const STAFF_BGS = ['bg-blue-50', 'bg-green-50', 'bg-yellow-50', 'bg-red-50', 'bg-purple-50', 'bg-pink-50', 'bg-orange-50', 'bg-teal-50'];
                 const staffBg = STAFF_BGS[index % STAFF_BGS.length];
 
@@ -1730,10 +2032,12 @@ export default function App() {
                            return phasesToday.map((p, pIdx) => (
                             <div
                               key={`${idx}-${pIdx}`}
-                              className={`h-6 mx-0.5 mb-0.5 ${getPhaseColor(p.type)} rounded text-white text-[9px] font-bold flex items-center justify-center truncate cursor-pointer hover:opacity-80 transition-opacity shadow-sm`}
-                              title={`${job.name}\n${p.type} ${p.startTime}-${p.endTime}`}
+                              onClick={() => { if (currentUserRole === 'admin') setDailyEditContext({ job, date: dateStr }); }}
+                              className={`mx-0.5 mb-0.5 px-1 py-0.5 ${getPhaseColor(p.type)} rounded text-white cursor-pointer hover:opacity-80 transition-opacity shadow-sm leading-tight`}
+                              title={`${job.name}\nกิจกรรม: ${p.type}\nเวลา: ${p.startTime}-${p.endTime}${job.location ? '\nสถานที่: ' + job.location : ''}`}
                             >
-                              {p.type}
+                              <div className="text-[10px] font-bold truncate">{job.name}</div>
+                              <div className="text-[9px] font-medium opacity-95 truncate">{p.startTime}-{p.endTime}</div>
                             </div>
                            ));
                         })}
@@ -1754,7 +2058,7 @@ export default function App() {
       <div className="bg-white border-b shadow-sm sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 py-2 flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-3">
-            <div className="bg-blue-600 p-2 rounded-lg shadow-sm"><CalendarIcon size={22} className="text-white" /></div>
+            <img src="/logo.png" alt="L&E BEYOND" className="h-10 w-auto object-contain flex-shrink-0" />
             <div className="hidden sm:flex flex-col">
               <h1 className="text-2xl font-black text-gray-800 tracking-tight leading-none">L&E BEYOND</h1>
               <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mt-0.5">Team Schedule</span>
@@ -1829,6 +2133,7 @@ export default function App() {
         handleDeleteJob={handleDeleteJob}
         staffList={staffList}
         setDialog={setDialog}
+        savedLocations={savedLocations}
       />
 
       <DailyEditModal
@@ -1853,7 +2158,7 @@ export default function App() {
               <div className="flex justify-between items-center mb-3">
                  <h3 className="font-bold text-sm text-gray-800">{editingStaffId ? 'แก้ไขข้อมูลพนักงาน' : 'เพิ่มรายชื่อใหม่'}</h3>
                  {editingStaffId && (
-                     <button type="button" onClick={() => { setEditingStaffId(null); setStaffForm({ name: '', role: ROLES[0], phone: '', headcount: 1 }); }} className="text-xs text-gray-500 hover:text-gray-800 underline">ยกเลิกการแก้ไข</button>
+                     <button type="button" onClick={() => { setEditingStaffId(null); setStaffForm({ name: '', role: ROLES[0], customRole: '', phone: '', headcount: 1 }); }} className="text-xs text-gray-500 hover:text-gray-800 underline">ยกเลิกการแก้ไข</button>
                  )}
               </div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
@@ -1863,15 +2168,25 @@ export default function App() {
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-gray-500 mb-1">ตำแหน่ง *</label>
-                  <select name="role" value={staffForm.role} onChange={e => setStaffForm({...staffForm, role: e.target.value})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+                  <select name="role" value={staffForm.role} onChange={e => setStaffForm({...staffForm, role: e.target.value, customRole: e.target.value === CUSTOM_ROLE ? (staffForm.customRole || '') : ''})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
                     {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+                    <option value={CUSTOM_ROLE}>อื่นๆ (ระบุเอง)</option>
                   </select>
+                  {staffForm.role === CUSTOM_ROLE && (
+                    <input
+                      type="text"
+                      value={staffForm.customRole || ''}
+                      onChange={e => setStaffForm({...staffForm, customRole: e.target.value})}
+                      placeholder="พิมพ์ชื่อตำแหน่ง เช่น Rigger"
+                      className="w-full border border-blue-300 rounded p-2 text-sm outline-none mt-1.5 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                  )}
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-gray-500 mb-1">เบอร์ติดต่อ</label>
                   <input name="phone" value={staffForm.phone} onChange={e => setStaffForm({...staffForm, phone: e.target.value})} placeholder="ระบุเบอร์" className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
                 </div>
-                {staffForm.role === 'Outsource Team' ? (
+                {(staffForm.role === 'Outsource Team' || (staffForm.role === CUSTOM_ROLE && (staffForm.customRole||'').trim() === 'Outsource Team')) ? (
                   <div>
                     <label className="block text-[11px] font-bold text-gray-500 mb-1">จำนวน(คน)</label>
                     <input name="headcount" type="number" min="1" value={staffForm.headcount} onChange={e => setStaffForm({...staffForm, headcount: e.target.value})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
@@ -1925,14 +2240,37 @@ export default function App() {
             </div>
             <textarea readOnly value={generateLineSummary()} className="w-full h-64 border border-gray-300 rounded-lg p-3 text-sm bg-gray-50 font-mono text-gray-800 outline-none resize-none shadow-inner" />
             <button
-              onClick={() => {
-                navigator.clipboard.writeText(generateLineSummary());
-                setDialog({ isOpen: true, type: 'info', message: 'คัดลอกข้อความเรียบร้อย นำไปวางใน Line ได้เลย!' });
-                setIsLineSummaryOpen(false);
+              onClick={async () => {
+                const text = generateLineSummary();
+                let done = false;
+                // วิธีหลัก
+                try {
+                  await navigator.clipboard.writeText(text);
+                  done = true;
+                } catch (err) {
+                  // วิธีสำรอง: เผื่อเบราว์เซอร์บล็อก clipboard (เช่นเปิดผ่าน http หรือใน webview)
+                  try {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    done = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                  } catch (e2) { done = false; }
+                }
+                if (done) {
+                  setIsLineSummaryOpen(false);
+                  setDialog({ isOpen: true, type: 'info', message: 'คัดลอกข้อความทั้งหมดเรียบร้อย นำไปวางในไลน์ได้เลย!' });
+                } else {
+                  setDialog({ isOpen: true, type: 'info', message: 'คัดลอกอัตโนมัติไม่สำเร็จ (เบราว์เซอร์บล็อกไว้)\n\nให้กดค้างในกล่องข้อความ แล้วเลือกทั้งหมด → คัดลอก แทนครับ' });
+                }
               }}
-              className="w-full mt-4 px-4 py-2.5 bg-[#00B900] text-white rounded-lg hover:bg-[#009900] font-bold shadow-sm transition-colors"
+              className="w-full mt-4 px-4 py-3 bg-[#00B900] text-white rounded-lg hover:bg-[#009900] font-bold shadow-sm transition-colors flex items-center justify-center gap-2"
             >
-              คัดลอกข้อความ
+              <Copy size={18} /> คัดลอกข้อความทั้งหมด
             </button>
           </div>
         </div>
